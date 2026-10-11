@@ -178,6 +178,24 @@ impl Drop for CallLock {
     }
 }
 
+/// Panics unless a dropped `CallLock` is free for another thread.
+///
+/// The check runs once per process, so every test built on Credential Manager calls fails at
+/// once instead of waiting out the lock timeout when locks are not released.
+#[cfg(test)]
+pub(crate) fn assert_call_lock_released() {
+    static RELEASED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        drop(CallLock::acquire_within(5_000).expect("the call lock"));
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| CallLock::acquire_within(5_000).is_ok())
+                .join()
+                .unwrap()
+        })
+    });
+    assert!(*RELEASED, "a dropped call lock stays held");
+}
+
 /// Names the lock after the user, whose credential set it guards.
 fn lock_name() -> Result<Vec<u16>> {
     let mut name = String::from("Global\\windows-native-keyring-store-");

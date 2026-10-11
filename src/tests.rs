@@ -34,6 +34,7 @@ fn test_store_methods() {
 
 fn entry_new(service: &str, user: &str) -> Entry {
     SET_STORE.call_once(usually_goes_in_main);
+    crate::utils::assert_call_lock_released();
     Entry::new(&format!("test-{service}"), user).unwrap_or_else(|err| {
         panic!("Couldn't create entry (service: {service}, user: {user}): {err:?}")
     })
@@ -41,6 +42,7 @@ fn entry_new(service: &str, user: &str) -> Entry {
 
 fn entry_new_with_modifiers(service: &str, user: &str, modifiers: &HashMap<&str, &str>) -> Entry {
     SET_STORE.call_once(usually_goes_in_main);
+    crate::utils::assert_call_lock_released();
     Entry::new_with_modifiers(&format!("test-{service}"), user, modifiers).unwrap_or_else(|err| {
         panic!("Couldn't create entry (service: {service}, user: {user}, modifiers: {modifiers:?}): {err:?})")
     })
