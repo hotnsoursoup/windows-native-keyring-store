@@ -14,7 +14,7 @@ This crate has one feature, `search`, that is enabled by default. This feature r
 
 ## Warning
 
-Windows Credential Manager loses updates when credentials, even different ones, are written and deleted concurrently. A read can miss a credential just written, and a deleted credential can survive. This crate serializes its calls per user across threads and processes, which does not cover software calling Credential Manager directly. See [issue #20](https://github.com/open-source-cooperative/windows-native-keyring-store/issues/20).
+Windows Credential Manager loses updates when credentials, even different ones, are written and deleted concurrently. This crate uses a named mutex keyed by the effective Windows user's `SID` to serialize its calls across threads and processes. Calls made directly to Credential Manager remain outside this lock ([issue #20](https://github.com/open-source-cooperative/windows-native-keyring-store/issues/20)).
 
 ## License
 

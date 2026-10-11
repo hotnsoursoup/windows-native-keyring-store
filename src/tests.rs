@@ -56,6 +56,120 @@ fn generate_random_string() -> String {
     generate_random_string_of_len(12usize)
 }
 
+#[test]
+fn test_reads_wait_for_the_windows_user_mutex() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateMutexW, GetCurrentProcess, OpenProcessToken, ReleaseMutex, WaitForSingleObject,
+    };
+
+    struct NativeHandle(HANDLE);
+
+    impl Drop for NativeHandle {
+        fn drop(&mut self) {
+            // SAFETY: This guard exclusively owns the live handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    struct UserMutex {
+        handle: NativeHandle,
+        owned: bool,
+    }
+
+    impl UserMutex {
+        fn release(mut self) {
+            // SAFETY: This thread acquired the live mutex and has not released it.
+            assert_ne!(unsafe { ReleaseMutex(self.handle.0) }, 0);
+            self.owned = false;
+        }
+    }
+
+    impl Drop for UserMutex {
+        fn drop(&mut self) {
+            if self.owned {
+                // SAFETY: This thread still owns the live mutex.
+                unsafe { ReleaseMutex(self.handle.0) };
+            }
+        }
+    }
+
+    let run_id = generate_random_string();
+    let entry = entry_new(&run_id, &run_id);
+    std::thread::scope(|scope| {
+        // `user_sid` mutations must not change the kernel mutex oracle.
+        let mut token = std::ptr::null_mut();
+        // SAFETY: The current process pseudo-handle is valid and `token` is writable.
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        assert_ne!(opened, 0);
+        let token = NativeHandle(token);
+        let mut buffer = [0u64; 11];
+        let mut written = 0;
+        // SAFETY: The live token is queryable and the aligned buffer holds `TOKEN_USER` and a maximum-size `SID`.
+        let queried = unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                u32::try_from(size_of_val(&buffer)).unwrap(),
+                &mut written,
+            )
+        };
+        assert_ne!(queried, 0);
+        // SAFETY: The successful query initialized `TOKEN_USER` inside the aligned buffer.
+        let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        // SAFETY: The `SID` remains valid while its token-information buffer lives.
+        let length = usize::try_from(unsafe { GetLengthSid(sid) }).unwrap();
+        // SAFETY: The successful query and `GetLengthSid` bound the `SID` inside the live buffer.
+        let sid = unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), length) };
+        let prefix = "Global\\windows-native-keyring-store-";
+        let hex = b"0123456789abcdef";
+        let mut name = Vec::with_capacity(prefix.len() + 2 * sid.len() + 1);
+        name.extend(prefix.encode_utf16());
+        for byte in sid {
+            name.push(u16::from(hex[usize::from(byte >> 4)]));
+            name.push(u16::from(hex[usize::from(byte & 15)]));
+        }
+        name.push(0);
+        // SAFETY: The UTF-16 buffer includes its terminator and the API accepts a `null` descriptor.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        assert!(!handle.is_null());
+        let handle = NativeHandle(handle);
+        // SAFETY: The owned handle remains live throughout the bounded wait.
+        let status = unsafe { WaitForSingleObject(handle.0, 10_000) };
+        assert!(matches!(status, WAIT_OBJECT_0 | WAIT_ABANDONED));
+        let mutex = UserMutex {
+            handle,
+            owned: true,
+        };
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let run_id = run_id.as_str();
+        let entry = &entry;
+        scope.spawn(move || {
+            started_tx.send(run_id).unwrap();
+            result_tx.send((run_id, entry.get_password())).unwrap();
+        });
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            run_id
+        );
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(250)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        mutex.release();
+        let (reply_id, result) = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(reply_id, run_id);
+        assert!(matches!(result, Err(Error::NoEntry)));
+    });
+}
+
 fn generate_random_bytes() -> Vec<u8> {
     use fastrand;
     use std::iter::repeat_with;
