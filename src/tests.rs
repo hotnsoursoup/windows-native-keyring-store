@@ -557,7 +557,8 @@ fn test_simultaneous_deletes_leave_no_credentials() {
         .filter(|name| {
             let entry = entry_new(name, name);
             let found = entry.get_password().is_ok();
-            let _ = entry.delete_credential();
+            let cred: &Cred = entry.as_any().downcast_ref().unwrap();
+            crate::utils::delete_test_record(&cred.target_name);
             found
         })
         .count();

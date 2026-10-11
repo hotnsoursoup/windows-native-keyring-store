@@ -293,6 +293,18 @@ pub fn delete_credential(target_name: &str) -> Result<()> {
     }
 }
 
+/// Deletes a test record under the call lock without `delete_credential`.
+///
+/// A broken `delete_credential` then cannot leave the record behind to slow later tests.
+#[cfg(test)]
+pub(crate) fn delete_test_record(target_name: &str) {
+    let target_name = to_wstr(target_name);
+    if let Ok(_lock) = CallLock::acquire() {
+        // SAFETY: The target is NUL-terminated and outlives the call.
+        unsafe { CredDeleteW(target_name.as_ptr(), CRED_TYPE_GENERIC, 0) };
+    }
+}
+
 /// Enumerate generic credentials
 #[cfg(feature = "search")]
 pub fn enumerate_credentials(
