@@ -1,6 +1,5 @@
 use byteorder::{ByteOrder, LittleEndian};
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::iter::once;
 use std::ptr;
 
@@ -198,11 +197,15 @@ pub(crate) fn assert_call_lock_released() {
 
 /// Names the lock after the user, whose credential set it guards.
 fn lock_name() -> Result<Vec<u16>> {
-    let mut name = String::from("Global\\windows-native-keyring-store-");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut name: Vec<u16> = "Global\\windows-native-keyring-store-"
+        .encode_utf16()
+        .collect();
     for byte in user_sid()? {
-        write!(name, "{byte:02x}").unwrap();
+        name.extend([HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 15)]].map(u16::from));
     }
-    Ok(to_wstr(&name))
+    name.push(0);
+    Ok(name)
 }
 
 /// Returns the SID of the thread's effective token, which selects the credential set.

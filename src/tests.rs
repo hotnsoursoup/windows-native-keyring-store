@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::{Arc, Once};
 
 use crate::Store;
@@ -32,20 +33,50 @@ fn test_store_methods() {
     assert_ne!(id1, id3);
 }
 
-fn entry_new(service: &str, user: &str) -> Entry {
-    SET_STORE.call_once(usually_goes_in_main);
-    crate::utils::assert_call_lock_released();
-    Entry::new(&format!("test-{service}"), user).unwrap_or_else(|err| {
-        panic!("Couldn't create entry (service: {service}, user: {user}): {err:?}")
-    })
+/// An [`Entry`] whose record is deleted when the test drops it, even on panic.
+///
+/// The deletion bypasses `delete_credential`, so a broken one cannot leave records behind to slow
+/// later tests.
+struct TestEntry(Entry);
+
+impl Deref for TestEntry {
+    type Target = Entry;
+
+    fn deref(&self) -> &Entry {
+        &self.0
+    }
 }
 
-fn entry_new_with_modifiers(service: &str, user: &str, modifiers: &HashMap<&str, &str>) -> Entry {
+impl Drop for TestEntry {
+    fn drop(&mut self) {
+        if let Some(cred) = self.0.as_any().downcast_ref::<Cred>() {
+            crate::utils::delete_test_record(&cred.target_name);
+        }
+    }
+}
+
+fn entry_new(service: &str, user: &str) -> TestEntry {
     SET_STORE.call_once(usually_goes_in_main);
     crate::utils::assert_call_lock_released();
-    Entry::new_with_modifiers(&format!("test-{service}"), user, modifiers).unwrap_or_else(|err| {
-        panic!("Couldn't create entry (service: {service}, user: {user}, modifiers: {modifiers:?}): {err:?})")
-    })
+    TestEntry(
+        Entry::new(&format!("test-{service}"), user).unwrap_or_else(|err| {
+            panic!("Couldn't create entry (service: {service}, user: {user}): {err:?}")
+        }),
+    )
+}
+
+fn entry_new_with_modifiers(
+    service: &str,
+    user: &str,
+    modifiers: &HashMap<&str, &str>,
+) -> TestEntry {
+    SET_STORE.call_once(usually_goes_in_main);
+    crate::utils::assert_call_lock_released();
+    TestEntry(
+        Entry::new_with_modifiers(&format!("test-{service}"), user, modifiers).unwrap_or_else(|err| {
+            panic!("Couldn't create entry (service: {service}, user: {user}, modifiers: {modifiers:?}): {err:?})")
+        }),
+    )
 }
 
 fn generate_random_string_of_len(len: usize) -> String {
@@ -528,41 +559,43 @@ fn test_simultaneous_multiple_create_delete_single_thread() {
 #[test]
 fn test_simultaneous_deletes_leave_no_credentials() {
     let base = &generate_random_string();
-    let names: Vec<String> = (0..10)
+    let entries: Vec<(String, TestEntry)> = (0..10)
         .flat_map(|t| (0..40).map(move |r| format!("{base}-{t}-{r}")))
+        .map(|name| {
+            let entry = entry_new(&name, &name);
+            (name, entry)
+        })
         .collect();
-    let misses: usize = std::thread::scope(|scope| {
-        let workers: Vec<_> = names
+    let failed_workers = std::thread::scope(|scope| {
+        let workers: Vec<_> = entries
             .chunks(40)
             .map(|chunk| {
+                // Stopping at the first failed call keeps a broken call from piling up records.
                 scope.spawn(move || {
-                    let mut misses = 0;
-                    for name in chunk {
-                        let entry = entry_new(name, name);
-                        entry.set_password(name).unwrap();
-                        misses += usize::from(entry.get_password().ok().as_deref() != Some(name));
-                        misses += usize::from(entry.delete_credential().is_err());
-                    }
-                    misses
+                    chunk.iter().any(|(name, entry)| {
+                        entry.set_password(name).is_err()
+                            || entry.get_password().ok().as_deref() != Some(name)
+                            || entry.delete_credential().is_err()
+                            || !matches!(entry.get_password(), Err(Error::NoEntry))
+                    })
                 })
             })
             .collect();
         workers
             .into_iter()
             .map(|worker| worker.join().unwrap())
-            .sum()
+            .filter(|&failed| failed)
+            .count()
     });
-    let survivors = names
+    let survivors = entries
         .iter()
-        .filter(|name| {
-            let entry = entry_new(name, name);
-            let found = entry.get_password().is_ok();
-            let cred: &Cred = entry.as_any().downcast_ref().unwrap();
-            crate::utils::delete_test_record(&cred.target_name);
-            found
-        })
+        .filter(|(_, entry)| entry.get_password().is_ok())
         .count();
-    assert_eq!((misses, survivors), (0, 0), "(failed calls, survivors)");
+    assert_eq!(
+        (failed_workers, survivors),
+        (0, 0),
+        "(failed workers, survivors)"
+    );
 }
 
 #[test]
