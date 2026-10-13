@@ -14,7 +14,7 @@ This crate has one feature, `search`, that is enabled by default. This feature r
 
 ## Warning
 
-Tests show that operating on the same entry from different threads does not reliably sequence the operations in the same order they are initiated. (For example, setting a password on one thread and then immediately spawning another to get the password returns a `NoEntry` error on the spawned thread.) So be careful not to access the same entry on multiple threads simultaneously.
+Windows Credential Manager loses updates when credentials, even different ones, are written and deleted concurrently. This crate uses a named mutex keyed by the effective Windows user's `SID` to serialize its calls across threads and processes. That makes this credential store thread-safe, but cannot ensure safety in the face of simultaneous access to the credentials by 3rd-party software.
 
 ## License
 

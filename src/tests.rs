@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::{Arc, Once};
 
 use crate::Store;
@@ -32,18 +33,50 @@ fn test_store_methods() {
     assert_ne!(id1, id3);
 }
 
-fn entry_new(service: &str, user: &str) -> Entry {
-    SET_STORE.call_once(usually_goes_in_main);
-    Entry::new(&format!("test-{service}"), user).unwrap_or_else(|err| {
-        panic!("Couldn't create entry (service: {service}, user: {user}): {err:?}")
-    })
+/// An [`Entry`] whose record is deleted when the test drops it, even on panic.
+///
+/// The deletion bypasses `delete_credential`, so a broken one cannot leave records behind to slow
+/// later tests.
+struct TestEntry(Entry);
+
+impl Deref for TestEntry {
+    type Target = Entry;
+
+    fn deref(&self) -> &Entry {
+        &self.0
+    }
 }
 
-fn entry_new_with_modifiers(service: &str, user: &str, modifiers: &HashMap<&str, &str>) -> Entry {
+impl Drop for TestEntry {
+    fn drop(&mut self) {
+        if let Some(cred) = self.0.as_any().downcast_ref::<Cred>() {
+            crate::utils::delete_test_record(&cred.target_name);
+        }
+    }
+}
+
+fn entry_new(service: &str, user: &str) -> TestEntry {
     SET_STORE.call_once(usually_goes_in_main);
-    Entry::new_with_modifiers(&format!("test-{service}"), user, modifiers).unwrap_or_else(|err| {
-        panic!("Couldn't create entry (service: {service}, user: {user}, modifiers: {modifiers:?}): {err:?})")
-    })
+    crate::utils::assert_call_lock_released();
+    TestEntry(
+        Entry::new(&format!("test-{service}"), user).unwrap_or_else(|err| {
+            panic!("Couldn't create entry (service: {service}, user: {user}): {err:?}")
+        }),
+    )
+}
+
+fn entry_new_with_modifiers(
+    service: &str,
+    user: &str,
+    modifiers: &HashMap<&str, &str>,
+) -> TestEntry {
+    SET_STORE.call_once(usually_goes_in_main);
+    crate::utils::assert_call_lock_released();
+    TestEntry(
+        Entry::new_with_modifiers(&format!("test-{service}"), user, modifiers).unwrap_or_else(|err| {
+            panic!("Couldn't create entry (service: {service}, user: {user}, modifiers: {modifiers:?}): {err:?})")
+        }),
+    )
 }
 
 fn generate_random_string_of_len(len: usize) -> String {
@@ -54,6 +87,120 @@ fn generate_random_string_of_len(len: usize) -> String {
 
 fn generate_random_string() -> String {
     generate_random_string_of_len(12usize)
+}
+
+#[test]
+fn test_reads_wait_for_the_windows_user_mutex() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateMutexW, GetCurrentProcess, OpenProcessToken, ReleaseMutex, WaitForSingleObject,
+    };
+
+    struct NativeHandle(HANDLE);
+
+    impl Drop for NativeHandle {
+        fn drop(&mut self) {
+            // SAFETY: This guard exclusively owns the live handle.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    struct UserMutex {
+        handle: NativeHandle,
+        owned: bool,
+    }
+
+    impl UserMutex {
+        fn release(mut self) {
+            // SAFETY: This thread acquired the live mutex and has not released it.
+            assert_ne!(unsafe { ReleaseMutex(self.handle.0) }, 0);
+            self.owned = false;
+        }
+    }
+
+    impl Drop for UserMutex {
+        fn drop(&mut self) {
+            if self.owned {
+                // SAFETY: This thread still owns the live mutex.
+                unsafe { ReleaseMutex(self.handle.0) };
+            }
+        }
+    }
+
+    let run_id = generate_random_string();
+    let entry = entry_new(&run_id, &run_id);
+    std::thread::scope(|scope| {
+        // `user_sid` mutations must not change the kernel mutex oracle.
+        let mut token = std::ptr::null_mut();
+        // SAFETY: The current process pseudo-handle is valid and `token` is writable.
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        assert_ne!(opened, 0);
+        let token = NativeHandle(token);
+        let mut buffer = [0u64; 11];
+        let mut written = 0;
+        // SAFETY: The live token is queryable and the aligned buffer holds `TOKEN_USER` and a maximum-size `SID`.
+        let queried = unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                u32::try_from(size_of_val(&buffer)).unwrap(),
+                &mut written,
+            )
+        };
+        assert_ne!(queried, 0);
+        // SAFETY: The successful query initialized `TOKEN_USER` inside the aligned buffer.
+        let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        // SAFETY: The `SID` remains valid while its token-information buffer lives.
+        let length = usize::try_from(unsafe { GetLengthSid(sid) }).unwrap();
+        // SAFETY: The successful query and `GetLengthSid` bound the `SID` inside the live buffer.
+        let sid = unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), length) };
+        let prefix = "Global\\windows-native-keyring-store-";
+        let hex = b"0123456789abcdef";
+        let mut name = Vec::with_capacity(prefix.len() + 2 * sid.len() + 1);
+        name.extend(prefix.encode_utf16());
+        for byte in sid {
+            name.push(u16::from(hex[usize::from(byte >> 4)]));
+            name.push(u16::from(hex[usize::from(byte & 15)]));
+        }
+        name.push(0);
+        // SAFETY: The UTF-16 buffer includes its terminator and the API accepts a `null` descriptor.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        assert!(!handle.is_null());
+        let handle = NativeHandle(handle);
+        // SAFETY: The owned handle remains live throughout the bounded wait.
+        let status = unsafe { WaitForSingleObject(handle.0, 10_000) };
+        assert!(matches!(status, WAIT_OBJECT_0 | WAIT_ABANDONED));
+        let mutex = UserMutex {
+            handle,
+            owned: true,
+        };
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let run_id = run_id.as_str();
+        let entry = &entry;
+        scope.spawn(move || {
+            started_tx.send(run_id).unwrap();
+            result_tx.send((run_id, entry.get_password())).unwrap();
+        });
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            run_id
+        );
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(250)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        mutex.release();
+        let (reply_id, result) = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(reply_id, run_id);
+        assert!(matches!(result, Err(Error::NoEntry)));
+    });
 }
 
 fn generate_random_bytes() -> Vec<u8> {
@@ -331,7 +478,6 @@ fn test_create_set_then_move() {
 }
 
 #[test]
-#[ignore] // it's clear that setting on one thread and getting on another is not reliable
 fn test_simultaneous_create_set_then_move() {
     let mut handles = vec![];
     let base = generate_random_string();
@@ -408,6 +554,48 @@ fn test_simultaneous_multiple_create_delete_single_thread() {
     for handle in handles {
         handle.join().unwrap()
     }
+}
+
+#[test]
+fn test_simultaneous_deletes_leave_no_credentials() {
+    let base = &generate_random_string();
+    let entries: Vec<(String, TestEntry)> = (0..10)
+        .flat_map(|t| (0..40).map(move |r| format!("{base}-{t}-{r}")))
+        .map(|name| {
+            let entry = entry_new(&name, &name);
+            (name, entry)
+        })
+        .collect();
+    let failed_workers = std::thread::scope(|scope| {
+        let workers: Vec<_> = entries
+            .chunks(40)
+            .map(|chunk| {
+                // Stopping at the first failed call keeps a broken call from piling up records.
+                scope.spawn(move || {
+                    chunk.iter().any(|(name, entry)| {
+                        entry.set_password(name).is_err()
+                            || entry.get_password().ok().as_deref() != Some(name)
+                            || entry.delete_credential().is_err()
+                            || !matches!(entry.get_password(), Err(Error::NoEntry))
+                    })
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|&failed| failed)
+            .count()
+    });
+    let survivors = entries
+        .iter()
+        .filter(|(_, entry)| entry.get_password().is_ok())
+        .count();
+    assert_eq!(
+        (failed_workers, survivors),
+        (0, 0),
+        "(failed workers, survivors)"
+    );
 }
 
 #[test]
