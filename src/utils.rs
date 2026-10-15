@@ -26,9 +26,13 @@ use keyring_core::error::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(u32)]
+/// The persistence of a generic credential, one of the `CRED_PERSIST` values.
 pub enum CredPersist {
+    /// Lasts only for the current logon session.
     Session = CRED_PERSIST_SESSION,
+    /// Persists on this computer only.
     Local = CRED_PERSIST_LOCAL_MACHINE,
+    /// Persists on this computer and roams to the user's other computers.
     Enterprise = CRED_PERSIST_ENTERPRISE,
 }
 
