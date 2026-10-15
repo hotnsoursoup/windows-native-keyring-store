@@ -11,7 +11,7 @@ use crate::cred::Cred;
 /// The store for Windows native credentials
 #[derive(Clone)]
 pub struct Store {
-    /// The crate version and creation time of the store, reported by [`Store::id`].
+    /// The unique ID for this store instance.
     pub id: String,
     /// The `prefix`, `divider`, and `suffix` strings used when forming a `target_name` from `user` and `service`.
     pub delimiters: [String; 3],
