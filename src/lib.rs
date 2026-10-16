@@ -88,8 +88,10 @@ threads.
 
  */
 
+/// Credentials for Windows Credential Manager entries.
 pub mod cred;
 pub use cred::CredPersist;
+/// The credential store backed by the Windows Credential Manager.
 pub mod store;
 pub use store::Store;
 #[cfg(test)]

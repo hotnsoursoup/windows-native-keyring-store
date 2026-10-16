@@ -1,6 +1,6 @@
 # Windows Native Keyring Store
 
-[![build](https://github.com/open-source-cooperative/windows-native-keyring-store/actions/workflows/ci.yaml/badge.svg)](https://github.com/open-source-cooperative/windows-native-keyring-store/actions) [![crates.io](https://img.shields.io/crates/v/windows-native-keyring-store.svg?style=flat-square)](https://crates.io/crates/windows-native-keyring-store) [![docs.rs](https://docs.rs/windows-native-keyring-store/badge.svg)](https://docs.rs/windows-native-keyring-store)
+[![build](https://github.com/open-source-cooperative/windows-native-keyring-store/actions/workflows/ci.yaml/badge.svg)](https://github.com/open-source-cooperative/windows-native-keyring-store/actions) [![crates.io](https://img.shields.io/crates/v/windows-native-keyring-store.svg?style=flat-square)](https://crates.io/crates/windows-native-keyring-store) [![docs.rs](https://docs.rs/windows-native-keyring-store/badge.svg)](https://docs.rs/windows-native-keyring-store) [![codecov](https://codecov.io/gh/open-source-cooperative/windows-native-keyring-store/graph/badge.svg)](https://codecov.io/gh/open-source-cooperative/windows-native-keyring-store)
 
 This library provides a credential store for use with the [keyring ecosystem](https://github.com/open-source-cooperative/keyring-rs/wiki/Keyring) that uses the Windows native credential store.
 
@@ -14,7 +14,7 @@ This crate has one feature, `search`, that is enabled by default. This feature r
 
 ## Warning
 
-Tests show that operating on the same entry from different threads does not reliably sequence the operations in the same order they are initiated. (For example, setting a password on one thread and then immediately spawning another to get the password returns a `NoEntry` error on the spawned thread.) So be careful not to access the same entry on multiple threads simultaneously.
+Windows Credential Manager loses updates when credentials, even different ones, are written and deleted concurrently. This crate uses a named mutex keyed by the effective Windows user's `SID` to serialize its calls across threads and processes. That makes this credential store thread-safe, but cannot ensure safety in the face of simultaneous access to the credentials by 3rd-party software.
 
 ## License
 
