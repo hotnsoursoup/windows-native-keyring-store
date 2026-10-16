@@ -502,6 +502,7 @@ unsafe fn from_wstr(ws: *const u16) -> String {
 pub struct WindowsErrorCode(pub u32);
 
 impl WindowsErrorCode {
+    /// Returns the raw value of the error code (a Windows `DWORD`).
     pub fn value(&self) -> u32 {
         self.0
     }
