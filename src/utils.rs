@@ -560,7 +560,7 @@ mod tests {
             release_tx.send(()).unwrap();
             assert!(
                 matches!(&error, Some(Error::PlatformFailure(inner))
-                    if inner.downcast_ref::<PlatformError>().map(|e| e.0) == Some(ERROR_TIMEOUT)),
+                    if inner.downcast_ref::<WindowsErrorCode>().map(|e| e.0) == Some(ERROR_TIMEOUT)),
                 "{error:?}"
             );
         });
